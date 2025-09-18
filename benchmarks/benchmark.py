@@ -353,8 +353,8 @@ def main():
 
     # B200 GPU Theoretical Specifications
     B200_MEM_BANDWIDTH = 8 * 1e12
-    B200_FP4_PFLOPS = 10 * 1e15
-    B200_BF16_PFLOPS = 5 * 1e15
+    B200_FP4_PFLOPS = 18 * 1e15
+    B200_BF16_PFLOPS = 4.5 * 1e15
 
     if not torch.cuda.is_available():
         print("❌ CUDA is not available.")
