@@ -113,7 +113,7 @@ def benchmark_bf16_gemm(m, n, k, iterations, warmup):
 
 # --- Quantization Configuration Benchmark ---
 
-def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
+def benchmark_quantization_configs(iterations, warmup, mem_bandwidth, square_dims):
     print("\n" + "="*60)
     print("🚀 Starting Quantization Configuration Benchmark...")
     print("="*60)
@@ -123,11 +123,8 @@ def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    tensor_dimensions = [
-        (4096, 4096),
-        (8192, 8192),
-        (16384, 16384),
-    ]
+    # Use square matrix configurations
+    tensor_dimensions = [(d, d) for d in square_dims]
     
     configs = [
         {'name': 'Row-wise', 'rowwise': True, 'columnwise': False},
@@ -242,7 +239,7 @@ def benchmark_make_empty_cost(iterations, warmup):
     print(f"Overhead of recreating vs. reusing: {overhead_percent:.2f}%")
     print("\n" + "="*60)
 
-# --- NEW: End-to-End Linear Layer Benchmark ---
+# --- End-to-End Linear Layer Benchmark ---
 
 def benchmark_linear_layer_e2e(m, n, k, iterations, warmup):
     """
@@ -356,6 +353,9 @@ def main():
     B200_FP4_PFLOPS = 18 * 1e15
     B200_BF16_PFLOPS = 4.5 * 1e15
 
+    # Define a common list of square dimensions
+    SQUARE_DIMS = [512, 768, 1024, 2048, 4096, 8192, 16384]
+
     if not torch.cuda.is_available():
         print("❌ CUDA is not available.")
         return
@@ -363,11 +363,8 @@ def main():
     # --- Run GEMM Benchmarks ---
     print(f"🚀 Starting GEMM Benchmark on {torch.cuda.get_device_name(0)}...")
     print("-" * 60)
-    TEST_CONFIGURATIONS_GEMM = [
-        (1024, 1024, 1024), (2048, 2048, 2048),
-        (4096, 4096, 4096), (4096, 4096, 8192),
-        (8192, 8192, 8192),
-    ]
+    # Use square matrix configurations
+    TEST_CONFIGURATIONS_GEMM = [(d, d, d) for d in SQUARE_DIMS]
     all_results = []
     for m, n, k in TEST_CONFIGURATIONS_GEMM:
         print(f"Benchmarking GEMM: M={m}, N={n}, K={k}...")
@@ -397,7 +394,7 @@ def main():
         print(df)
 
     # --- Run Quantization Config Benchmark ---
-    benchmark_quantization_configs(args.iterations, args.warmup, B200_MEM_BANDWIDTH)
+    benchmark_quantization_configs(args.iterations, args.warmup, B200_MEM_BANDWIDTH, SQUARE_DIMS)
 
     # --- Run make_empty() Cost Benchmark ---
     benchmark_make_empty_cost(args.iterations, args.warmup)
@@ -407,13 +404,8 @@ def main():
     print("🚀 Starting End-to-End Linear Layer Benchmark...")
     print("="*60)
     
-    TEST_CONFIGS_E2E = [
-        # M,    N,     K
-        (4096, 4096, 4096),
-        (4096, 4096, 11008), # Llama2-7B MLP FFN1
-        (4096, 11008, 4096), # Llama2-7B MLP FFN2
-        (4096, 8192, 8192), 
-    ]
+    # Use square matrix configurations
+    TEST_CONFIGS_E2E = [(d, d, d) for d in SQUARE_DIMS]
     
     e2e_results = []
     for m, n, k in TEST_CONFIGS_E2E:
@@ -438,4 +430,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
