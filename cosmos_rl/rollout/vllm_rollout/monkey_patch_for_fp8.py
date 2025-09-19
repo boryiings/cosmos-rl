@@ -20,18 +20,17 @@ from cosmos_rl.utils.logging import logger
 """
 This file is used to patch the vllm model to use rowwise fp8 linear.
 """
-class QuantizedParameter(nn.Parameter):
+class QuantizedParameter(Parameter):
     """
     A custom parameter that holds quantization metadata.
     """
-    def __new__(cls, data=None, requires_grad=True, scale=None, zero_point=None):
+    def __new__(cls, data=None, requires_grad=False, scale=None, zero_point=None, shape=None):
         # Create the underlying nn.Parameter tensor object
-        if data is None:
-            data = torch.empty(0)
-        
+        dummy = torch.zeros(shape, dtype=torch.uint8).t()
+
         # This calls the __new__ method of the parent class (nn.Parameter)
         # to create the actual tensor object.
-        instance = super().__new__(cls, data._columnwise_data, requires_grad=requires_grad)
+        instance = super().__new__(cls, dummy, requires_grad=requires_grad)
 
         # Attach custom attributes to the new instance
         instance.nvfp4_type = data
@@ -53,16 +52,29 @@ def simplify_process_weights_after_loading():
     """
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_shape = layer.weight.shape
-        te_dtype = tex.DType.kFloat4E2M1
-        w_quantizer = NVFP4Quantizer(fp4_dtype=te_dtype, rowwise=False, columnwise=True)
-        w_nvfp4 = w_quantizer.make_empty(w_shape, dtype=layer.weight.dtype)
-        w_nvfp4 = w_quantizer.update_quantized(layer.weight, w_nvfp4)
+        if isinstance(layer, QKVParallelLinear):
+            logger.info(f"Fp8LinearMethod layer: {layer}")
+            # Warning: this is only for rowwise fp8 linear.
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                layer.weight, scale=None, use_per_token_if_dynamic=True
+            )
 
-        # Update the layer with the new values
-        layer.weight = QuantizedParameter(w_nvfp4)
-        layer.weight_scale = None
-        layer.input_scale = None
+            # Update the layer with the new values
+            layer.weight = Parameter(qweight.t(), requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale.float(), requires_grad=False)
+            layer.input_scale = None
+        else:
+            logger.info(f"Fp8LinearMethod layer: {layer}")
+            w_shape = layer.weight.shape
+            te_dtype = tex.DType.kFloat4E2M1
+            w_quantizer = NVFP4Quantizer(fp4_dtype=te_dtype, rowwise=False, columnwise=True)
+            w_nvfp4 = w_quantizer.make_empty(w_shape, dtype=layer.weight.dtype)
+            w_nvfp4 = w_quantizer.update_quantized(layer.weight, w_nvfp4)
+
+            # Update the layer with the new values
+            layer.weight = QuantizedParameter(w_nvfp4, requires_grad=False, shape=w_shape)
+            layer.weight_scale = Parameter(torch.ones(1).float(), requires_grad=False)
+            layer.input_scale = None
 
     # modify the process_weights_after_loading method for rowwise fp8 linear.
     Fp8LinearMethod.process_weights_after_loading = (
