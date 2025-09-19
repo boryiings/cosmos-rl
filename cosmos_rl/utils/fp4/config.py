@@ -44,10 +44,11 @@ class CastConfig:
     """
     scaling_type: ScalingType = ScalingType.DYNAMIC
     scaling_granularity: ScalingGranularity = ScalingGranularity.TENSORWISE
-    target_dtype: Optional[torch.dtype] = None
+    target_dtype: Optional[tex.DType] = None
     
     def short_str(self):
-        return f"{self.scaling_type.short_str()}_{self.scaling_granularity.short_str()}_{te_dtype.name}"
+        dtype_name = (self.target_dtype.name if self.target_dtype is not None else te_dtype.name)
+        return f"{self.scaling_type.short_str()}_{self.scaling_granularity.short_str()}_{dtype_name}"
     
     def __post_init__(self):
         if self.scaling_granularity is ScalingGranularity.AXISWISE:
@@ -86,16 +87,6 @@ class Float4LinearConfig:
     cast_config_grad_output: CastConfig = CastConfig()
     cast_config_grad_output_for_grad_weight: Optional[CastConfig] = None
 
-    # Per-linear configuration
-
-    enable_fsdp_float4_all_gather: bool = False
-
-    pad_inner_dim: bool = False
-
-    emulate: bool = False
-
-    round_scales_to_power_of_2: bool = False
-
     def __post_init__(self):
         if self.cast_config_input_for_grad_weight is None:
             object.__setattr__(self, "cast_config_input_for_grad_weight", self.cast_config_input)
@@ -104,9 +95,6 @@ class Float4LinearConfig:
         if self.cast_config_grad_output_for_grad_weight is None:
             object.__setattr__(self, "cast_config_grad_output_for_grad_weight", self.cast_config_grad_output)
     
-        if self.cast_config_weight.scaling_granularity != ScalingGranularity.TENSORWISE:
-            assert not self.enable_fsdp_float4_all_gather, f"enable_fsdp_float4_all_gather only supported for tensorwise scaling granularity, got {self.cast_config_weight.scaling_granularity}"
-
         cc_i = self.cast_config_input
         cc_w = self.cast_config_weight
         cc_go = self.cast_config_grad_output
@@ -162,7 +150,6 @@ class Float4LinearConfig:
                 cast_config_input=cc_i,
                 cast_config_weight=cc_w,
                 cast_config_grad_output=cc_go,
-                round_scales_to_power_of_2=True,
             )
 
         elif recipe_name is Float4LinearRecipeName.ROWWISE_WITH_GW_HP:
@@ -172,8 +159,8 @@ class Float4LinearConfig:
             cc_go = CastConfig(scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype)
             cc_w_gi = CastConfig(scaling_granularity=ScalingGranularity.TENSORWISE)
 
-            cc_i_gw = CastConfig(scaling_granularity=ScalingGranularity.DISABLED)
-            cc_go_gw = CastConfig(scaling_granularity=ScalingGranularity.DISABLED, target_dtype=te_dtype)
+            cc_i_gw = CastConfig(scaling_type=ScalingType.DISABLED)
+            cc_go_gw = CastConfig(scaling_type=ScalingType.DISABLED, target_dtype=te_dtype)
 
             return Float4LinearConfig(
                 cast_config_input=cc_i,
@@ -182,7 +169,6 @@ class Float4LinearConfig:
                 cast_config_input_for_grad_weight=cc_i_gw,
                 cast_config_weight_for_grad_input=cc_w_gi,
                 cast_config_grad_output_for_grad_weight=cc_go_gw,
-                round_scales_to_power_of_2=True,
             )
 
         else:
