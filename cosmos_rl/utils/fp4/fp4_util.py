@@ -131,10 +131,6 @@ class FP4ModelConverter(ModelConverter):
             )
         elif self.fp4_config.quant_recipe == "tensorwise":
             self.precompute_scale = False
-            enable_fsdp_float4_all_gather = False
-            self.nvfp4_config = Float4LinearConfig(
-                enable_fsdp_float4_all_gather=enable_fsdp_float4_all_gather,
-            )
 
     def convert_model(self, model: torch.nn.Module) -> torch.nn.Module:
         if not IS_TORCH_COMPATIBLE_WITH_FP4:
