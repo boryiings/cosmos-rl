@@ -1,7 +1,14 @@
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import torch
 from torch.nn import Parameter
+import torch.nn.functional as F
+
+import transformer_engine as te
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.module.base import get_workspace
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
@@ -10,21 +17,32 @@ from vllm.model_executor.layers.quantization.utils import w8a8_utils
 
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.logging import logger
 
 """
 This file is used to patch the vllm model to use rowwise fp8 linear.
 """
+class QuantizedParameter(Parameter):
+    """
+    A custom parameter that holds quantization metadata.
+    """
+    def __new__(cls, data=None, requires_grad=False, scale=None, zero_point=None, shape=None):
+        # Create the underlying nn.Parameter tensor object
+        dummy = torch.zeros(shape, dtype=torch.uint8).t()
 
+        # This calls the __new__ method of the parent class (nn.Parameter)
+        # to create the actual tensor object.
+        instance = super().__new__(cls, dummy, requires_grad=requires_grad)
 
-def apply_patch_to_dispatch():
-    # ensure that fp8 linear kernel is dispatched to torch._scaled_mm per-token/rowwise
-    def dispatch_fp8_linear_kernel_to_torch_scaled_mm(*args, **kwargs):
-        return w8a8_utils.torch_per_token_w8a8_scaled_mm
+        # Attach custom attributes to the new instance
+        instance.nvfp4_type = data
+        
+        return instance
 
-    w8a8_utils.dispatch_w8a8_scaled_mm = dispatch_fp8_linear_kernel_to_torch_scaled_mm
-
-
-apply_patch_to_dispatch()
+    def __repr__(self):
+        # Customize the string representation to show our metadata
+        return (f"QuantizedParameter(scale={self.scale}, zero_point={self.zero_point}, "
+                f"data=\n{super().__repr__()})")
 
 
 def simplify_process_weights_after_loading():
@@ -45,6 +63,7 @@ def simplify_process_weights_after_loading():
         layer.weight = Parameter(qweight.t(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         layer.input_scale = None
+        logger.info(f"{qweight.shape=}, {qweight.dtype=}, {layer.weight.shape=}, {weight_scale.shape=}, {weight_scale.dtype=}")
 
     # modify the process_weights_after_loading method for rowwise fp8 linear.
     Fp8LinearMethod.process_weights_after_loading = (
@@ -55,10 +74,85 @@ def simplify_process_weights_after_loading():
 simplify_process_weights_after_loading()
 
 
+
+class NVFP4LinearOp:
+    def __init__(self):
+        te_dtype = tex.DType.kFloat4E2M1
+        self.x_quantizer = NVFP4Quantizer(fp4_dtype=te_dtype, rowwise=True, columnwise=False)
+        self.w_quantizer = NVFP4Quantizer(fp4_dtype=te_dtype, rowwise=False, columnwise=True)
+        self.workspace = get_workspace()
+        self.w_nvfp4 = None
+
+
+    def apply(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = None,
+        input_scale: Optional[torch.Tensor] = None,
+        input_scale_ub: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # logger.info(f"{input.shape=}, {input.dtype=}, {weight.shape=}, {weight.dtype=}, {weight_scale.shape=}, {weight_scale.dtype=}")
+        # if input_scale:
+        #     logger.info(f"{input_scale.shape=}, {input_scale.dtype=}")
+        # Quantize the input tensor to NVFP4
+        x_shape = input.shape
+        te_dtype = tex.DType.kFloat4E2M1
+        if self.w_nvfp4 is None:
+            w_fp32 = weight.float() * weight_scale.t()
+            w_bf16 = w_fp32.to(torch.bfloat16)
+            self.w_nvfp4 = self.w_quantizer.make_empty(w_bf16.shape, dtype=w_bf16.dtype)
+            self.w_nvfp4 = self.w_quantizer.update_quantized(w_bf16, self.w_nvfp4)
+
+        current_dim = input.shape[0]  # 1788
+        multiple = 16
+        # This formula finds the difference to the next multiple of 16
+        if current_dim % 16 is not 0:
+            padding_needed = (multiple - (current_dim % multiple)) % multiple # (16 - (1788 % 16)) % 16 = 4
+            new_x = (current_dim // multiple + 1) * multiple
+            new_shape = (new_x, input.shape[1])
+        else:
+            new_shape = input.shape
+        x_nvfp4 = self.x_quantizer.make_empty(new_shape, dtype=input.dtype)
+        x_nvfp4 = self.x_quantizer.update_quantized(input, x_nvfp4)
+        # logger.info(f"w_nvfp4 shape = {self.w_nvfp4.shape}, x_nvfp4 shape = {x_nvfp4.shape}, {input.dtype=}, {weight.dtype=}")
+
+        # All other GEMM args
+        out_quantizer, bias, gelu_input, D_preallocated = None, None, None, None
+        bias_dtype = TE_DType[torch.bfloat16]
+        use_gelu, use_grad, accumulate, use_split_accumulator = False, False, False, False
+        workspace_size = self.workspace.numel()
+        transa, transb = False, False
+        original = tex.generic_gemm(
+            self.w_nvfp4,
+            transa,
+            x_nvfp4,
+            transb,
+            D_preallocated,
+            out_quantizer,
+            TE_DType[torch.bfloat16],
+            bias,
+            bias_dtype,
+            use_gelu,
+            gelu_input,
+            use_grad,
+            self.workspace,
+            workspace_size,
+            accumulate,
+            use_split_accumulator,
+        )[0]
+        if current_dim % 16 is not 0:
+            return original[:current_dim, :]
+        return original
+
+
 # patch the Linear layer.
 def apply_fp8_linear_patch(model: torch.nn.Module):
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
+        logger.info(f"Found module name {name}, quant_method = {quant_method}, modules = {module}")
         if quant_method is None:
             continue
         elif isinstance(quant_method, Fp8LinearMethod):
@@ -67,12 +161,8 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
             # WARNING: in `Fp8LinearOp` `__init__`, vllm will read the `vllm_config`
             # But at this time, `vllm_config` is empty. So there will have a warning that complains
             # it is not set. This only affects the padding, seems not a big problem.
-            quant_method.fp8_linear = Fp8LinearOp(
-                # disable cutlass fp8, beacause we want that torch._scaled_mm is used for fp8 linear.
-                cutlass_fp8_supported=False,
-                # enable per token, because we are using rowwise now.
-                use_per_token_if_dynamic=True,
-            )
+            quant_method.fp8_linear = NVFP4LinearOp()
+            logger.info(f"Found Fp8LinearMethod, name = {name}, quant_method = {quant_method}, fp8_linear = {quant_method.fp8_linear}")
         else:
             # We will not handle other quant methods.
             pass
@@ -114,7 +204,7 @@ def cache_weight_of_quantized_module(
                 module.weight
             )  # qweight has shape [in_dim, out_dim]
             hp_weight = (
-                module.weight.t().to(promotion_dtype).contiguous()
+                module.weight.to(promotion_dtype).t().contiguous()
             )  # hp weight has shape [out_dim, in_dim]
             hp_weight_map[compatible_name] = Parameter(hp_weight, requires_grad=False)
         else:

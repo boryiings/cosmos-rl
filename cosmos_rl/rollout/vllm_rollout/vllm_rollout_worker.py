@@ -431,6 +431,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
+        do_weight_sync_check = False
         target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
         check_inside_group = do_weight_sync_check
         if self.quantization_type is not None:

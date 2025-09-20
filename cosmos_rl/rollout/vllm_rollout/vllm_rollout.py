@@ -16,6 +16,7 @@ import os
 
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
+import time
 import vllm
 import torch
 import copy
@@ -227,6 +228,9 @@ class vLLMRollout(RolloutBase):
 
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
+            total_tokens = 0
+            num_examples = 0
+            st = time.time()
             with torch.cuda.stream(stream):
                 results = self.rollout_engine.generate(
                     new_prompts,
@@ -239,10 +243,16 @@ class vLLMRollout(RolloutBase):
                     RolloutResult(
                         prompt=payloads[i].prompt,
                         completions=[
-                            output.outputs[i].text for i in range(len(output.outputs))
+                            output.outputs[j].text for j in range(len(output.outputs))
                         ],
                     )
                 )
+                num_examples += len(output.outputs)
+                for text in output.outputs:
+                    total_tokens += len(text.token_ids)
+            time_elapsed = time.time() - st
+            rank = torch.distributed.get_rank()
+            logger.info(f"Rank{rank}: Rollout time = {time_elapsed:.3f} seconds, number of results = {len(results)}, {num_examples=}, {total_tokens=}")
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
             import traceback
