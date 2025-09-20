@@ -19,24 +19,33 @@ from flash_attn import (
     flash_attn_varlen_func as ori_flash_attn_varlen_func,
 )
 from flash_attn.layers.rotary import apply_rotary_emb as ori_apply_rotary_emb
+import torch
 
+def _lastdim_contig(x: torch.Tensor) -> torch.Tensor:
+    return x if x is None or x.stride(-1) == 1 else x.contiguous()
 
-def _flash_attn_func(*args, **kwargs):
-    return ori_flash_attn_func(*args, **kwargs)
+def _flash_attn_func(q, k, v, *args, **kwargs):
+    q = _lastdim_contig(q)
+    k = _lastdim_contig(k)
+    v = _lastdim_contig(v)
+    return ori_flash_attn_func(q, k, v, *args, **kwargs)
 
-
-def _flash_attn_varlen_func(*args, **kwargs):
-    return ori_flash_attn_varlen_func(*args, **kwargs)
-
+def _flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs):
+    q = _lastdim_contig(q)
+    k = _lastdim_contig(k)
+    v = _lastdim_contig(v)
+    cu_seqlens_q = cu_seqlens_q.to(torch.int32).contiguous()
+    cu_seqlens_k = cu_seqlens_k.to(torch.int32).contiguous()
+    return ori_flash_attn_varlen_func(
+        q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs
+    )
 
 def _apply_rotary_emb(*args, **kwargs):
     return ori_apply_rotary_emb(*args, **kwargs)
 
-
 flash_attn_func = _flash_attn_func
 flash_attn_varlen_func = _flash_attn_varlen_func
 apply_rotary_emb = _apply_rotary_emb
-
 
 def set_flash_attn_deterministic(deterministic: bool):
     global flash_attn_func, flash_attn_varlen_func, apply_rotary_emb
